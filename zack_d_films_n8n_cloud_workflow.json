@@ -1,0 +1,858 @@
+{
+  "name": "Zack D. Films Autonomous Cloud Pipeline (Veo 3 + Shotstack)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "c1000001-0001-4000-8000-000000000001",
+      "name": "Schedule Trigger (30m Watchdog)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "c1000001-0002-4000-8000-000000000002",
+      "name": "Read Production Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = Date.now();\nconst rows = $input.all();\n\nconst target = rows.find(r => {\n  const status = r.json.Status;\n  const lastUpdated = r.json.Last_Updated ? new Date(r.json.Last_Updated).getTime() : 0;\n  const isStaleCrash = status === 'IN_PROGRESS' && (now - lastUpdated > 20 * 60 * 1000);\n  return status === 'PENDING' || status === 'CRASHED_NEEDS_RETRY' || isStaleCrash;\n});\n\nif (!target) return [];\nreturn [target];"
+      },
+      "id": "c1000001-0003-4000-8000-000000000003",
+      "name": "Pick Pending or Crashed Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Row_ID": "={{ $json.Row_ID }}",
+            "Status": "IN_PROGRESS",
+            "Last_Updated": "={{ $now.toISO() }}"
+          },
+          "matchingColumns": [
+            "Row_ID"
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000001-0004-4000-8000-000000000004",
+      "name": "Lock Row (IN_PROGRESS)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=YOUR_GEMINI_API_KEY",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Generate a 5-shot Zack D. Films 35-second video script (7 seconds per shot) for topic: {{ $json.Topic }}. Return ONLY a valid JSON array of 5 objects with keys: shot_number (1 to 5), flow_prompt (starting with: 3D educational CGI animation in the style of Zack D. Films, hyper-detailed translucent glass-like anatomical cutaway, clean cinematic studio rim lighting, smooth continuous macro camera motion, Unreal Engine 5 render, 9:16 vertical, no text), and voiceover_text (strictly under 110 characters).\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "id": "c1000001-0005-4000-8000-000000000005",
+      "name": "Generate 5-Shot Prompts & VO Script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const jobMeta = $('Pick Pending or Crashed Job').first().json;\nconst shots = JSON.parse($input.first().json.candidates[0].content.parts[0].text);\nconst completedShot = Number(jobMeta.Current_Completed_Shot || 0);\n\nreturn shots\n  .filter(s => s.shot_number > completedShot)\n  .map(s => ({\n    json: {\n      Row_ID: jobMeta.Row_ID,\n      Topic: jobMeta.Topic,\n      shot_number: s.shot_number,\n      flow_prompt: s.flow_prompt,\n      voiceover_text: s.voiceover_text,\n      prev_frame_url: jobMeta[`Shot_${s.shot_number - 1}_Frame_URL`] || null\n    }\n  }));"
+      },
+      "id": "c1000001-0006-4000-8000-000000000006",
+      "name": "Build Remaining Shot Queue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "c1000001-0007-4000-8000-000000000007",
+      "name": "Loop 5 Shots Sequentially",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR_GCP_PROJECT_ID/locations/us-central1/publishers/google/models/veo-3.0-generate-preview:predictLongRunning",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"instances\": [\n    {\n      \"prompt\": {{ JSON.stringify($json.flow_prompt) }}\n      {{ $json.prev_frame_url ? ', \"image\": { \"gcsUri\": \"' + $json.prev_frame_url + '\" }' : '' }}\n    }\n  ],\n  \"parameters\": {\n    \"aspectRatio\": \"9:16\",\n    \"durationSeconds\": 8,\n    \"sampleCount\": 1,\n    \"generateAudio\": true,\n    \"storageUri\": \"gs://YOUR_GCS_BUCKET_NAME/veo_renders/\"\n  }\n}",
+        "options": {}
+      },
+      "id": "c1000001-0008-4000-8000-000000000008",
+      "name": "Veo 3.x Generate 8s Clip + Native Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 25,
+        "unit": "seconds"
+      },
+      "id": "c1000001-0009-4000-8000-000000000009",
+      "name": "Wait 25s for Veo 3",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR_GCP_PROJECT_ID/locations/us-central1/publishers/google/models/veo-3.0-generate-preview:fetchPredictOperation",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"operationName\": \"{{ $('Veo 3.x Generate 8s Clip + Native Audio').item.json.name }}\"\n}",
+        "options": {}
+      },
+      "id": "c1000001-0010-4000-8000-000000000010",
+      "name": "Poll Veo 3 Operation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "veo-done-check",
+              "leftValue": "={{ $json.done }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1000001-0011-4000-8000-000000000011",
+      "name": "Is Veo Clip Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.shotstack.io/edit/v1/render",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"timeline\": {\n    \"tracks\": [\n      {\n        \"clips\": [\n          {\n            \"asset\": {\n              \"type\": \"video\",\n              \"src\": \"{{ $json.response.videos[0].gcsUri.replace('gs://', 'https://storage.googleapis.com/') }}\",\n              \"trim\": 6.95\n            },\n            \"start\": 0,\n            \"length\": 0.04\n          }\n        ]\n      }\n    ]\n  },\n  \"output\": {\n    \"format\": \"png\",\n    \"aspectRatio\": \"9:16\",\n    \"resolution\": \"hd\"\n  }\n}",
+        "options": {}
+      },
+      "id": "c1000001-0012-4000-8000-000000000012",
+      "name": "Shotstack Extract Frame at 7.0s (PNG)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2420,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 10,
+        "unit": "seconds"
+      },
+      "id": "c1000001-0013-4000-8000-000000000013",
+      "name": "Wait 10s for Frame PNG",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.shotstack.io/edit/v1/render/{{ $('Shotstack Extract Frame at 7.0s (PNG)').item.json.response.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000001-0014-4000-8000-000000000014",
+      "name": "Get Extracted Frame URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.elevenlabs.io/v1/text-to-speech/YOUR_VOICE_ID",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "xi-api-key",
+              "value": "YOUR_ELEVENLABS_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": {{ JSON.stringify($('Loop 5 Shots Sequentially').item.json.voiceover_text) }},\n  \"model_id\": \"eleven_turbo_v2_5\",\n  \"voice_settings\": {\n    \"stability\": 0.4,\n    \"similarity_boost\": 0.75,\n    \"style\": 0.2\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "c1000001-0015-4000-8000-000000000015",
+      "name": "Generate Voiceover MP3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "name": "=job_{{ $('Loop 5 Shots Sequentially').item.json.Row_ID }}_vo_{{ $('Loop 5 Shots Sequentially').item.json.shot_number }}.mp3",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "c1000001-0016-4000-8000-000000000016",
+      "name": "Save VO Segment to Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3300,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Row_ID": "={{ $('Loop 5 Shots Sequentially').item.json.Row_ID }}",
+            "Current_Completed_Shot": "={{ $('Loop 5 Shots Sequentially').item.json.shot_number }}",
+            "Last_Frame_URL": "={{ $('Get Extracted Frame URL').item.json.response.url }}",
+            "Last_Updated": "={{ $now.toISO() }}"
+          },
+          "matchingColumns": [
+            "Row_ID"
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000001-0017-4000-8000-000000000017",
+      "name": "Checkpoint Shot in Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3520,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.shotstack.io/edit/v1/render",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"timeline\": {\n    \"tracks\": [\n      {\n        \"clips\": [\n          { \"asset\": { \"type\": \"audio\", \"src\": \"{{ $json.Shot_1_VO_URL }}\", \"volume\": 1.0 }, \"start\": 0, \"length\": 7 },\n          { \"asset\": { \"type\": \"audio\", \"src\": \"{{ $json.Shot_2_VO_URL }}\", \"volume\": 1.0 }, \"start\": 7, \"length\": 7 },\n          { \"asset\": { \"type\": \"audio\", \"src\": \"{{ $json.Shot_3_VO_URL }}\", \"volume\": 1.0 }, \"start\": 14, \"length\": 7 },\n          { \"asset\": { \"type\": \"audio\", \"src\": \"{{ $json.Shot_4_VO_URL }}\", \"volume\": 1.0 }, \"start\": 21, \"length\": 7 },\n          { \"asset\": { \"type\": \"audio\", \"src\": \"{{ $json.Shot_5_VO_URL }}\", \"volume\": 1.0 }, \"start\": 28, \"length\": 7 }\n        ]\n      },\n      {\n        \"clips\": [\n          { \"asset\": { \"type\": \"video\", \"src\": \"{{ $json.Shot_1_Video_URL }}\", \"trim\": 0, \"volume\": 0.28 }, \"start\": 0, \"length\": 7 },\n          { \"asset\": { \"type\": \"video\", \"src\": \"{{ $json.Shot_2_Video_URL }}\", \"trim\": 0, \"volume\": 0.28 }, \"start\": 7, \"length\": 7 },\n          { \"asset\": { \"type\": \"video\", \"src\": \"{{ $json.Shot_3_Video_URL }}\", \"trim\": 0, \"volume\": 0.28 }, \"start\": 14, \"length\": 7 },\n          { \"asset\": { \"type\": \"video\", \"src\": \"{{ $json.Shot_4_Video_URL }}\", \"trim\": 0, \"volume\": 0.28 }, \"start\": 21, \"length\": 7 },\n          { \"asset\": { \"type\": \"video\", \"src\": \"{{ $json.Shot_5_Video_URL }}\", \"trim\": 0, \"volume\": 0.28 }, \"start\": 28, \"length\": 7 }\n        ]\n      }\n    ]\n  },\n  \"output\": {\n    \"format\": \"mp4\",\n    \"aspectRatio\": \"9:16\",\n    \"resolution\": \"1080\"\n  }\n}",
+        "options": {}
+      },
+      "id": "c1000001-0018-4000-8000-000000000018",
+      "name": "Shotstack Trim to 7s & Mix 35s Master",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "c1000001-0019-4000-8000-000000000019",
+      "name": "Wait 30s for Final Assembly",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.shotstack.io/edit/v1/render/{{ $('Shotstack Trim to 7s & Mix 35s Master').item.json.response.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_SHOTSTACK_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000001-0020-4000-8000-000000000020",
+      "name": "Poll Final 35s MP4 URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.response.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "c1000001-0021-4000-8000-000000000021",
+      "name": "Download Final 35s MP4 Binary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $('Lock Row (IN_PROGRESS)').first().json.Topic }}_Review_Ready.mp4",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "c1000001-0022-4000-8000-000000000022",
+      "name": "Upload Final Video to Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2420,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Row_ID": "={{ $('Lock Row (IN_PROGRESS)').first().json.Row_ID }}",
+            "Status": "READY_FOR_REVIEW",
+            "Final_Drive_Link": "={{ $json.webViewLink }}",
+            "Last_Updated": "={{ $now.toISO() }}"
+          },
+          "matchingColumns": [
+            "Row_ID"
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000001-0023-4000-8000-000000000023",
+      "name": "Update Sheet (READY_FOR_REVIEW)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2640,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "admin@yourdomain.com",
+        "subject": "=\ud83c\udfac Ready for Review: {{ $('Lock Row (IN_PROGRESS)').first().json.Topic }}",
+        "message": "=<h3>Zack D. Films Autonomous Cloud Pipeline Complete</h3><p><b>Topic:</b> {{ $('Lock Row (IN_PROGRESS)').first().json.Topic }}</p><p><b>Format:</b> 5 x 8s Veo 3.x Clips (Trimmed to 7s each = 35s Total with Native Audio)</p><p><b>Google Drive Review Link:</b> <a href=\"{{ $('Upload Final Video to Google Drive').first().json.webViewLink }}\">Click Here to Watch & Approve</a></p>",
+        "options": {}
+      },
+      "id": "c1000001-0024-4000-8000-000000000024",
+      "name": "Gmail Admin Notification",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2860,
+        40
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c1000001-0025-4000-8000-000000000025",
+      "name": "Global Crash Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        300,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "admin@yourdomain.com",
+        "subject": "=\ud83d\udea8 [PIPELINE CRASH] Video Generation Interrupted: {{ $json.execution.error.message }}",
+        "message": "=<h3>n8n Cloud Crash Detected</h3><p><b>Failed Node:</b> {{ $json.execution.lastNodeExecuted }}</p><p><b>Error:</b> {{ $json.execution.error.message }}</p><p>The 30-minute watchdog will automatically resume from the last completed shot checkpoint in Google Sheets.</p>",
+        "options": {}
+      },
+      "id": "c1000001-0026-4000-8000-000000000026",
+      "name": "Gmail Crash Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        540,
+        600
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (30m Watchdog)": {
+      "main": [
+        [
+          {
+            "node": "Read Production Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Production Queue": {
+      "main": [
+        [
+          {
+            "node": "Pick Pending or Crashed Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Pending or Crashed Job": {
+      "main": [
+        [
+          {
+            "node": "Lock Row (IN_PROGRESS)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lock Row (IN_PROGRESS)": {
+      "main": [
+        [
+          {
+            "node": "Generate 5-Shot Prompts & VO Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate 5-Shot Prompts & VO Script": {
+      "main": [
+        [
+          {
+            "node": "Build Remaining Shot Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Remaining Shot Queue": {
+      "main": [
+        [
+          {
+            "node": "Loop 5 Shots Sequentially",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop 5 Shots Sequentially": {
+      "main": [
+        [
+          {
+            "node": "Shotstack Trim to 7s & Mix 35s Master",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Veo 3.x Generate 8s Clip + Native Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Veo 3.x Generate 8s Clip + Native Audio": {
+      "main": [
+        [
+          {
+            "node": "Wait 25s for Veo 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 25s for Veo 3": {
+      "main": [
+        [
+          {
+            "node": "Poll Veo 3 Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Veo 3 Operation": {
+      "main": [
+        [
+          {
+            "node": "Is Veo Clip Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Veo Clip Ready?": {
+      "main": [
+        [
+          {
+            "node": "Shotstack Extract Frame at 7.0s (PNG)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 25s for Veo 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shotstack Extract Frame at 7.0s (PNG)": {
+      "main": [
+        [
+          {
+            "node": "Wait 10s for Frame PNG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 10s for Frame PNG": {
+      "main": [
+        [
+          {
+            "node": "Get Extracted Frame URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Extracted Frame URL": {
+      "main": [
+        [
+          {
+            "node": "Generate Voiceover MP3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Voiceover MP3": {
+      "main": [
+        [
+          {
+            "node": "Save VO Segment to Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save VO Segment to Drive": {
+      "main": [
+        [
+          {
+            "node": "Checkpoint Shot in Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkpoint Shot in Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Loop 5 Shots Sequentially",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shotstack Trim to 7s & Mix 35s Master": {
+      "main": [
+        [
+          {
+            "node": "Wait 30s for Final Assembly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 30s for Final Assembly": {
+      "main": [
+        [
+          {
+            "node": "Poll Final 35s MP4 URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Final 35s MP4 URL": {
+      "main": [
+        [
+          {
+            "node": "Download Final 35s MP4 Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Final 35s MP4 Binary": {
+      "main": [
+        [
+          {
+            "node": "Upload Final Video to Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Final Video to Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Update Sheet (READY_FOR_REVIEW)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Sheet (READY_FOR_REVIEW)": {
+      "main": [
+        [
+          {
+            "node": "Gmail Admin Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Global Crash Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Gmail Crash Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
